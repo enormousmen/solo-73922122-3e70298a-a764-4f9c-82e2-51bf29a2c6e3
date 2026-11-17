@@ -37,6 +37,19 @@ DEMO_NAMES = [
     "loop2.demo.test",
     "loop3.demo.test",
     "loop4.demo.test",
+    # CNAME 别名演示域名（alias / cname-smuggle profile）
+    "alias-one.demo.test",
+    "alias-chain1.demo.test",
+    "alias-chain2.demo.test",
+    "alias-chain3.demo.test",
+    "alias-multi.demo.test",
+    "alias-https.demo.test",
+    "smuggle-denied.demo.test",
+    "smuggle-allowed.demo.test",
+    "orphan-a.demo.test",
+    "broken.demo.test",
+    "cyc-a.demo.test",
+    "cyc-b.demo.test",
 ]
 DEMO_IPS = ["172.31.10.10", "172.31.20.10"]
 

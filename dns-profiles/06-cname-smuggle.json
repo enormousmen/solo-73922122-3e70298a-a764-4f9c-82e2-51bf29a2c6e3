@@ -1,0 +1,52 @@
+{
+  "profile": "cname-smuggle",
+  "description": "CNAME 别名攻击场景：夹带外域名 A（含允许/禁止地址）、归属不符、断链、成环、超跳数；探测必须在连接前按原因拦截",
+  "zones": {
+    "allowed.demo.test":        ["172.31.10.10"],
+    "www.allowed.demo.test":    ["172.31.10.10"],
+    "https.allowed.demo.test":  ["172.31.10.10"],
+    "multi-a.demo.test":        ["172.31.10.10", "172.31.10.11"],
+    "redirect-ok.demo.test":    ["172.31.10.10"],
+    "redirect-final.demo.test": ["172.31.10.10"],
+    "loop1.demo.test":          ["172.31.10.10"],
+    "loop2.demo.test":          ["172.31.10.10"],
+    "loop3.demo.test":          ["172.31.10.10"],
+    "loop4.demo.test":          ["172.31.10.10"],
+    "forbidden.demo.test":      ["172.31.20.10"],
+    "swapped.demo.test":        ["172.31.10.10"],
+
+    "smuggle-denied.demo.test": [
+      {"type": "CNAME", "name": "smuggle-denied.demo.test", "value": "allowed.demo.test"},
+      {"type": "A", "name": "allowed.demo.test", "value": "172.31.10.10"},
+      {"type": "A", "name": "evil-other.demo.test", "value": "172.31.20.10"}
+    ],
+    "smuggle-allowed.demo.test": [
+      {"type": "CNAME", "name": "smuggle-allowed.demo.test", "value": "allowed.demo.test"},
+      {"type": "A", "name": "allowed.demo.test", "value": "172.31.10.10"},
+      {"type": "A", "name": "foreign-allowed.demo.test", "value": "172.31.10.11"}
+    ],
+    "orphan-a.demo.test": [
+      {"type": "A", "name": "orphan-a.demo.test", "value": "172.31.10.10"},
+      {"type": "A", "name": "unrelated.demo.test", "value": "172.31.20.10"}
+    ],
+    "broken.demo.test": {
+      "cname": "missing-target.demo.test"
+    },
+    "cyc-a.demo.test": {
+      "cname": "cyc-b.demo.test"
+    },
+    "cyc-b.demo.test": {
+      "cname": "cyc-a.demo.test"
+    },
+    "long0.demo.test": {"cname": "long1.demo.test"},
+    "long1.demo.test": {"cname": "long2.demo.test"},
+    "long2.demo.test": {"cname": "long3.demo.test"},
+    "long3.demo.test": {"cname": "long4.demo.test"},
+    "long4.demo.test": {"cname": "long5.demo.test"},
+    "long5.demo.test": {"cname": "long6.demo.test"},
+    "long6.demo.test": {"cname": "long7.demo.test"},
+    "long7.demo.test": {"cname": "long8.demo.test"},
+    "long8.demo.test": {"cname": "long9.demo.test"},
+    "long9.demo.test": ["172.31.10.10"]
+  }
+}

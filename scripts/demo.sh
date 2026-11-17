@@ -62,6 +62,32 @@ switch_profile mixed
 probe_url "混合 A 记录（允许+禁止地址同时返回）：整体拒绝" \
   "http://multi-a.demo.test${HPORT}/"
 
+# 4b) 正常 CNAME 别名：单跳/多跳/HTTPS 别名都应沿链追踪后正常探测
+switch_profile alias
+probe_url "CNAME 单跳别名（alias-one -> allowed，沿链可追溯才连接）" \
+  "http://alias-one.demo.test${HPORT}/"
+probe_url "CNAME 多跳别名（chain1 -> chain2 -> chain3）" \
+  "http://alias-chain1.demo.test${HPORT}/"
+probe_url "CNAME 别名链尾多 A（全部获准才连接）" \
+  "http://alias-multi.demo.test${HPORT}/"
+probe_url "HTTPS 别名（证书仍按原域名 alias-https 校验）" \
+  "https://alias-https.demo.test${SPORT}/"
+
+# 4c) CNAME 攻击面：夹带外域名 A、断链、成环、超跳数——连接前按原因拦截
+switch_profile cname-smuggle
+probe_url "CNAME 夹带禁止网段外域名 A：归属不符，整体拒绝且零连接" \
+  "http://smuggle-denied.demo.test${HPORT}/"
+probe_url "CNAME 夹带白名单内外域名 A：归属不符仍拒绝（不连错服务）" \
+  "http://smuggle-allowed.demo.test${HPORT}/"
+probe_url "无 CNAME 但应答夹带外属主 A：归属不符拒绝" \
+  "http://orphan-a.demo.test${HPORT}/"
+probe_url "别名链断裂（CNAME 指向不存在的名字）：报告原因，零连接" \
+  "http://broken.demo.test${HPORT}/"
+probe_url "别名链成环（cyc-a <-> cyc-b）：报告成环，零连接" \
+  "http://cyc-a.demo.test${HPORT}/"
+probe_url "别名链超过有界跳数（默认上限 8 跳）：报告原因，零连接" \
+  "http://long0.demo.test${HPORT}/"
+
 # 5) 跳转：正常跳转、跳禁区拦截、非 HTTP 协议、3 次上限
 switch_profile allowed
 probe_url "正常跳转到允许目标" \

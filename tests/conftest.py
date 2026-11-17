@@ -19,14 +19,20 @@ from app.probe.policy import AddressPolicy
 
 # ---------------------------------------------------------------- DNS 假服务
 class FakeDns:
-    """可热切换 zones 的 UDP/53 假解析器。"""
+    """可热切换 zones 的 UDP/53 假解析器。
+
+    zone 值支持：
+      ["1.2.3.4"]                       —— 属主自身的 A 记录（传统写法）；
+      [{"type": "CNAME", ...}, ...]    —— 显式记录列表（可含任意属主，
+                                          用于构造 CNAME 链与夹带应答）。
+    """
 
     def __init__(self) -> None:
-        self.zones: dict[str, list[str]] = {}
+        self.zones: dict[str, list] = {}
         self._transport: asyncio.DatagramTransport | None = None
         self.queried_names: list[str] = []
 
-    def set_zones(self, zones: dict[str, list[str]]) -> None:
+    def set_zones(self, zones: dict[str, list]) -> None:
         self.zones = {k.lower(): list(v) for k, v in zones.items()}
 
     def connection_made(self, transport):  # noqa: ANN001
@@ -40,14 +46,18 @@ class FakeDns:
             msg = dns_wire.parse_message(data, require_qr=False)
             q = msg.questions[0]
             self.queried_names.append(q.qname)
-            if q.qname.lower() in self.zones:
-                reply = dns_wire.build_response(
-                    msg.qid, q, answers=self.zones[q.qname.lower()]
-                )
-            else:
+            entry = self.zones.get(q.qname.lower())
+            if entry is None:
                 reply = dns_wire.build_response(
                     msg.qid, q, rcode=dns_wire.RCODE_NAME_ERROR
                 )
+            elif entry and isinstance(entry[0], dict):
+                reply = dns_wire.build_response_from_records(
+                    msg.qid, q, records=entry
+                )
+            else:
+                # 空列表表示 rcode=OK 但无应答（别名链断裂场景）
+                reply = dns_wire.build_response(msg.qid, q, answers=entry)
         except (dns_wire.DnsProtocolError, IndexError):
             return
         assert self._transport is not None
@@ -189,6 +199,7 @@ def make_prober(fake_dns, demo_certs):
             dns_port=fake_dns.port,
             dns_timeout=2.0,
             dns_retries=0,
+            max_cname_hops=8,
             ca_bundle=str(cafile),
             connect_timeout=3.0,
             read_timeout=read_timeout,

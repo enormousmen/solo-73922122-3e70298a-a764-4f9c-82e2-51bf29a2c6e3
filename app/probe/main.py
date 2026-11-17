@@ -41,10 +41,19 @@ class HopReportModel(BaseModel):
     hostname: str = Field(..., description="URL 中的主机名（证书校验与 Host 头均用它）")
     port: int
     resolved_addresses: list[str] = Field(
-        ..., description="DNS 实际返回的全部 A 记录（IPv4）"
+        ..., description="沿 CNAME 链可追溯的全部 A 记录（IPv4）；只有这些地址可能被连接"
     )
     approved_addresses: list[str] = Field(
         ..., description="通过白名单校验的地址；整体被拒时为空列表"
+    )
+    cname_chain: list[str] = Field(
+        ..., description="从请求域名沿 CNAME 链可追溯的属主序列；无别名时仅含请求域名"
+    )
+    foreign_a_records: list[str] = Field(
+        ..., description="DNS 应答中夹带的非别名链属主 A 记录（审计展示，绝不用于连接）"
+    )
+    dns_queried_names: list[str] = Field(
+        ..., description="本次跳转向配置解析器实际发出的 DNS 查询名序列"
     )
     connected_peer: str | None = Field(
         None, description="实际建立 TCP 连接的 ip:port，固定为已批准地址；未连接为 null"
@@ -82,6 +91,7 @@ class PolicyResponse(BaseModel):
     dns_port: int
     ip_versions: list[str]
     max_redirects: int
+    max_cname_hops: int
     tls_verify: bool
     ca_bundle: str | None
     timeouts: dict
@@ -93,6 +103,7 @@ resolver = DnsResolver(
     port=settings.dns_port,
     timeout=settings.dns_timeout,
     retries=settings.dns_retries,
+    max_cname_hops=settings.max_cname_hops,
 )
 prober = Prober(
     policy=settings.policy,
@@ -116,8 +127,9 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "提交 HTTP/HTTPS URL，返回逐跳状态、DNS 解析地址、实际连接地址与拒绝原因。"
-        "仅支持 IPv4；每跳全部解析地址均在启动时配置的 CIDR 白名单内才会连接；"
-        "最多跟随 3 次跳转；被拒目标不会收到任何探测请求；HTTPS 始终按原域名验证证书。"
+        "仅支持 IPv4；CNAME 别名链逐跳追踪且有界，只有沿链可追溯且全部在启动时"
+        "配置的 CIDR 白名单内的地址才会连接；最多跟随 3 次跳转；被拒目标不会收到"
+        "任何探测请求；HTTPS 始终按原域名验证证书。"
     ),
     lifespan=lifespan,
 )
@@ -136,6 +148,7 @@ async def get_policy() -> PolicyResponse:
         dns_port=settings.dns_port,
         ip_versions=["IPv4"],
         max_redirects=settings.max_redirects,
+        max_cname_hops=settings.max_cname_hops,
         tls_verify=True,
         ca_bundle=settings.ca_bundle,
         timeouts={

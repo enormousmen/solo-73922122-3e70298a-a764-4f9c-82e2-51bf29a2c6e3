@@ -44,6 +44,15 @@ class HopReport:
     port: int
     resolved_addresses: list[str] = field(default_factory=list)
     approved_addresses: list[str] = field(default_factory=list)
+    cname_chain: list[str] = field(
+        default_factory=list,
+        # 从请求域名沿 CNAME 链可追溯的属主序列（无别名时仅含请求域名）
+    )
+    foreign_a_records: list[str] = field(
+        default_factory=list,
+        # DNS 应答中不属于本别名链的夹带 A 记录（仅审计展示，绝不用于连接）
+    )
+    dns_queried_names: list[str] = field(default_factory=list)
     connected_peer: str | None = None
     tls: dict | None = None
     request_sent: bool = False
@@ -135,16 +144,33 @@ class Prober:
         hop.hostname = host
         hop.port = port or DEFAULT_PORTS[scheme]
 
-        # 2) 解析 + 白名单：IP 字面量直接校验；域名只问配置的解析器
+        # 2) 解析 + 白名单：IP 字面量直接校验；域名只问配置的解析器。
+        #    解析器沿 CNAME 链追踪，只把链上属主的 A 记录交回；夹带地址、
+        #    断链、成环、超跳数都会在解析阶段以 DnsError 终止。
         try:
             if is_ip_literal(host):
                 resolved = [host]
+                hop.cname_chain = [host]
+                hop.dns_queried_names = []
             else:
-                resolved = await self._resolver.resolve_a(host)
+                result = await self._resolver.resolve_with_chain(host)
+                resolved = result.addresses
+                hop.cname_chain = list(result.cname_chain)
+                hop.foreign_a_records = list(result.foreign_a_records)
+                hop.dns_queried_names = list(result.queried_names)
             hop.resolved_addresses = list(resolved)
+            # 全部可追踪地址逐个过 CIDR 白名单，全或无
             approved = self._policy.check_resolved(resolved)
             hop.approved_addresses = [str(ip) for ip in approved]
         except (PolicyError, DnsError) as exc:
+            partial = getattr(exc, "partial", None)
+            if partial is not None:
+                hop.resolved_addresses = list(partial.addresses)
+                hop.cname_chain = list(partial.cname_chain) or [host]
+                hop.foreign_a_records = list(partial.foreign_a_records)
+                hop.dns_queried_names = list(partial.queried_names)
+            elif not hop.cname_chain:
+                hop.cname_chain = [host]
             hop.mark_blocked(str(exc))
             return None
 

@@ -19,7 +19,7 @@ from app.probe import dns_wire
 
 class InLoopDns:
     def __init__(self) -> None:
-        self.zones: dict[str, list[str]] = {}
+        self.zones: dict[str, list] = {}
         self._transport = None
 
     def connection_made(self, transport):  # noqa: ANN001
@@ -31,12 +31,17 @@ class InLoopDns:
     def datagram_received(self, data: bytes, addr) -> None:  # noqa: ANN001
         msg = dns_wire.parse_message(data, require_qr=False)
         q = msg.questions[0]
-        if q.qname.lower() in self.zones:
-            reply = dns_wire.build_response(msg.qid, q, answers=self.zones[q.qname.lower()])
-        else:
+        entry = self.zones.get(q.qname.lower())
+        if entry is None:
             reply = dns_wire.build_response(
                 msg.qid, q, rcode=dns_wire.RCODE_NAME_ERROR
             )
+        elif entry and isinstance(entry[0], dict):
+            reply = dns_wire.build_response_from_records(
+                msg.qid, q, records=entry
+            )
+        else:
+            reply = dns_wire.build_response(msg.qid, q, answers=entry)
         self._transport.sendto(reply, addr)
 
 

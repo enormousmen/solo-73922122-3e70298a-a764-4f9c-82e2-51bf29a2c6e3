@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from .dns_client import HARD_MAX_CNAME_HOPS
 from .policy import AddressPolicy, PolicyError
 
 
@@ -15,6 +16,7 @@ class Settings:
     dns_port: int
     dns_timeout: float
     dns_retries: int
+    max_cname_hops: int
     ca_bundle: str | None
     connect_timeout: float
     read_timeout: float
@@ -40,6 +42,12 @@ def load_settings() -> Settings:
     if max_redirects < 0 or max_redirects > 3:
         raise SystemExit("启动失败: MAX_REDIRECTS 仅允许 0..3（需求上限为 3 次跳转）")
 
+    max_cname_hops = int(os.getenv("MAX_CNAME_HOPS", "8"))
+    if max_cname_hops < 0 or max_cname_hops > HARD_MAX_CNAME_HOPS:
+        raise SystemExit(
+            f"启动失败: MAX_CNAME_HOPS 仅允许 0..{HARD_MAX_CNAME_HOPS}"
+        )
+
     ca_bundle = os.getenv("CA_BUNDLE", "").strip() or None
     if ca_bundle is not None and not os.path.isfile(ca_bundle):
         raise SystemExit(f"启动失败: CA_BUNDLE 文件不存在: {ca_bundle}")
@@ -50,6 +58,7 @@ def load_settings() -> Settings:
         dns_port=int(os.getenv("DNS_PORT", "53")),
         dns_timeout=float(os.getenv("DNS_TIMEOUT", "3.0")),
         dns_retries=int(os.getenv("DNS_RETRIES", "1")),
+        max_cname_hops=max_cname_hops,
         ca_bundle=ca_bundle,
         connect_timeout=float(os.getenv("CONNECT_TIMEOUT", "5.0")),
         read_timeout=float(os.getenv("READ_TIMEOUT", "10.0")),

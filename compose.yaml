@@ -91,6 +91,7 @@ services:
       DNS_PORT: "53"
       DNS_TIMEOUT: "3.0"
       DNS_RETRIES: "1"
+      MAX_CNAME_HOPS: "8"
       CA_BUNDLE: /app/certs/combined-ca-bundle.pem
       CONNECT_TIMEOUT: "5.0"
       TLS_TIMEOUT: "8.0"

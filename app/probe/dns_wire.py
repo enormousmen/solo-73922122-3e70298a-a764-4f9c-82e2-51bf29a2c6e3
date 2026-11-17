@@ -10,10 +10,13 @@ import struct
 from dataclasses import dataclass
 
 TYPE_A = 1
+TYPE_CNAME = 5
 CLASS_IN = 1
 RCODE_OK = 0
 RCODE_NAME_ERROR = 3  # NXDOMAIN
 RCODE_SERVFAIL = 2
+RCODE_FORMAT_ERROR = 1
+RCODE_REFUSED = 5
 
 FLAGS_QR = 0x8000
 FLAGS_AA = 0x0400
@@ -88,6 +91,9 @@ class DnsRecord:
     rclass: int
     ttl: int
     rdata: bytes
+    # 仅 CNAME 记录使用：解析后的目标域名（线协议解析阶段就解出来，
+    # 供别名链追踪；A 记录为 None）
+    target: str | None = None
 
 
 @dataclass
@@ -100,6 +106,12 @@ class DnsMessage:
 
     @property
     def a_records(self) -> list[str]:
+        """应答段中全部 class=IN、长度合法的 A 记录地址（不区分属主）。
+
+        注意：这里不做属主过滤；调用方必须结合 ``a_records_by_owner`` /
+        ``cname_targets_by_owner`` 做 CNAME 链归属校验，避免把夹带的
+        外域名 A 记录用于连接。
+        """
         import ipaddress
 
         out: list[str] = []
@@ -107,6 +119,28 @@ class DnsMessage:
             if rec.rtype == TYPE_A and rec.rclass == CLASS_IN and len(rec.rdata) == 4:
                 out.append(str(ipaddress.ip_address(rec.rdata)))
         return out
+
+    def a_records_by_owner(self) -> dict[str, list[str]]:
+        """按属主域名归类 A 记录（属主名一律小写、去尾点）。"""
+        import ipaddress
+
+        grouped: dict[str, list[str]] = {}
+        for rec in self.answers:
+            if rec.rtype == TYPE_A and rec.rclass == CLASS_IN and len(rec.rdata) == 4:
+                grouped.setdefault(rec.name.lower().rstrip("."), []).append(
+                    str(ipaddress.ip_address(rec.rdata))
+                )
+        return grouped
+
+    def cname_targets_by_owner(self) -> dict[str, str]:
+        """按属主域名返回 CNAME 目标；同一属主出现多条 CNAME 由调用方判错。"""
+        return {
+            rec.name.lower().rstrip("."): rec.target
+            for rec in self.answers
+            if rec.rtype == TYPE_CNAME
+            and rec.rclass == CLASS_IN
+            and rec.target is not None
+        }
 
 
 def build_query(qname: str, qid: int) -> bytes:
@@ -142,8 +176,19 @@ def parse_message(data: bytes, require_qr: bool = True) -> DnsMessage:
         rdata = data[offset : offset + rdlen]
         if len(rdata) != rdlen:
             raise DnsProtocolError("RDATA 截断")
+        target: str | None = None
+        if rtype == TYPE_CNAME and rclass == CLASS_IN:
+            # CNAME RDATA 是一个完整域名（允许压缩指针）；必须恰好占满 RDATA
+            try:
+                target, after = _read_name(data, offset)
+            except DnsProtocolError as exc:
+                raise DnsProtocolError(f"CNAME RDATA 域名解析失败: {exc}") from exc
+            if after != offset + rdlen:
+                raise DnsProtocolError("CNAME RDATA 长度与域名不一致")
+            if not target:
+                raise DnsProtocolError("CNAME 目标域名为空")
         offset += rdlen
-        answers.append(DnsRecord(name, rtype, rclass, ttl, rdata))
+        answers.append(DnsRecord(name, rtype, rclass, ttl, rdata, target))
     return DnsMessage(qid, flags, rcode, questions, answers)
 
 
@@ -154,21 +199,62 @@ def build_response(
     answers: list[str] | None = None,
     ttl: int = 30,
 ) -> bytes:
-    """构造一个仅含 A 记录应答的报文（演示用本地解析器）。"""
+    """构造一个仅含 *问题属主自身* A 记录应答的报文（兼容旧调用）。"""
     answers = answers or []
-    ancount = len(answers) if rcode == RCODE_OK else 0
+    records = [
+        {"type": "A", "name": question.qname if question else "", "value": ip}
+        for ip in answers
+    ]
+    return build_response_from_records(
+        qid, question, rcode=rcode, records=records, ttl=ttl
+    )
+
+
+def build_response_from_records(
+    qid: int,
+    question: DnsQuestion | None,
+    rcode: int = RCODE_OK,
+    records: list[dict] | None = None,
+    ttl: int = 30,
+) -> bytes:
+    """构造含任意属主 A/CNAME 记录的应答报文（演示解析器与测试使用）。
+
+    每条记录形如：
+      {"type": "A",     "name": "owner.example.", "value": "172.31.10.10"}
+      {"type": "CNAME", "name": "owner.example.", "value": "target.example."}
+    名称按原始 wire 形式编码（不使用压缩指针），探测端必须按属主归类，
+    不能把外属主的 A 记录当作问题域名的解析结果。
+    """
+    import ipaddress
+
+    records = records or []
+    ancount = len(records) if rcode == RCODE_OK else 0
     flags = FLAGS_QR | FLAGS_AA | FLAGS_RD | FLAGS_RA | rcode
-    out = bytearray(struct.pack("!HHHHHH", qid, flags, 1 if question else 0, ancount, 0, 0))
+    out = bytearray(
+        struct.pack("!HHHHHH", qid, flags, 1 if question else 0, ancount, 0, 0)
+    )
     if question is not None:
         out += _encode_name(question.qname)
         out += struct.pack("!HH", question.qtype, question.qclass)
-        for ip in answers:
-            import ipaddress
-
-            addr = ipaddress.ip_address(ip)
-            if addr.version != 4:
-                raise DnsProtocolError("演示解析器仅支持 A 记录")
-            out += _encode_name(question.qname)
-            out += struct.pack("!HHIH", TYPE_A, CLASS_IN, ttl, 4)
-            out += addr.packed
+        for rec in records:
+            rtype_str = str(rec.get("type", "")).upper()
+            owner = str(rec.get("name", "")).strip()
+            value = str(rec.get("value", "")).strip()
+            if not owner:
+                raise DnsProtocolError("应答记录缺少属主名")
+            out += _encode_name(owner)
+            if rtype_str == "A":
+                addr = ipaddress.ip_address(value)
+                if addr.version != 4:
+                    raise DnsProtocolError("演示解析器仅支持 A 记录")
+                out += struct.pack("!HHIH", TYPE_A, CLASS_IN, ttl, 4)
+                out += addr.packed
+            elif rtype_str == "CNAME":
+                if not value:
+                    raise DnsProtocolError("CNAME 记录缺少目标域名")
+                target_wire = _encode_name(value)
+                out += struct.pack("!HHIH", TYPE_CNAME, CLASS_IN, ttl, len(target_wire))
+                out += target_wire
+            else:
+                raise DnsProtocolError(f"不支持的演示记录类型: {rtype_str!r}")
     return bytes(out)

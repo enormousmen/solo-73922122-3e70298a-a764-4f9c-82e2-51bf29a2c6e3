@@ -11,12 +11,16 @@
 ```
 URL 静态校验（不产生流量）
    └─ DNS A 记录查询（只问配置的解析器，绝不用系统 getaddrinfo）
-        └─ 全部解析地址逐个过 IPv4 CIDR 白名单
-             └─ 全部获准才连接；任一地址在禁区 → 整体拒绝（不返回部分结果）
-                  └─ 仅向“检查时已批准的 IP”建 TCP，运行时不再解析 DNS
-                       └─ HTTPS 用原域名做 SNI 并验证证书（不可关闭校验）
-                            └─ 发送一次请求、读取响应
-                                 └─ 3xx 跳转：对 Location 重复整套流程（最多 3 次）
+        └─ 沿 CNAME 链追踪（后续查询仍只发往同一配置解析器，有界跳数）
+             ├─ 属主归属校验：只接受从请求域名沿链可追溯属主名下的 A 记录
+             ├─ 夹带的外域名 A、断链、成环、超跳数 → 带原因拒绝（不建任何连接）
+             └─ 完整取得链尾全部 A 地址
+                  └─ 全部地址逐个过 IPv4 CIDR 白名单
+                       └─ 全部获准才连接；任一地址在禁区 → 整体拒绝（不返回部分结果）
+                            └─ 仅向“检查时已批准的 IP”建 TCP，运行时不再解析 DNS
+                                 └─ HTTPS 用原域名做 SNI 并验证证书（不可关闭校验）
+                                      └─ 发送一次请求、读取响应
+                                           └─ 3xx 跳转：对 Location 重复整套流程（最多 3 次）
 ```
 
 由此满足：
@@ -25,11 +29,15 @@ URL 静态校验（不产生流量）
 | --- | --- |
 | 仅支持 IPv4 | IPv6 字面量、IPv6 CIDR、AAAA 均拒绝；策略层只接受 `IPv4Address` |
 | 启动时配置允许的 CIDR | 环境变量 `ALLOWED_CIDRS`（逗号分隔），非法配置直接拒绝启动 |
-| 每跳全部解析地址均获准才连接 | `AddressPolicy.check_resolved` 对完整 A 记录列表做“全或无”判定 |
+| 只连接沿 CNAME 链可追溯的地址 | `DnsResolver.resolve_with_chain` 逐应答做属主归属校验，外属主 A 记录一律拒绝 |
+| 别名查询仍只用配置解析器 | 链上每个名字的 A 查询都发往 `DNS_SERVER`，绝不向应答名字自举其他解析器 |
+| 完整地址 + 全或无白名单 | `AddressPolicy.check_resolved` 对链尾完整 A 记录列表做“全或无”判定 |
+| 别名链断裂/成环/超跳数/归属不符 | 解析阶段即带原因阻断（`DnsError.partial` 保留已收集链路），在任何 socket 之前 |
+| CNAME 有界跳数 | `MAX_CNAME_HOPS`（默认 8，硬上界 16，可设 0 禁止一切别名） |
 | 最多跟随 3 次跳转 | `MAX_REDIRECTS=3`（硬上限，启动配置仅允许 0..3） |
 | DNS 检查后变化不能进入禁区 | 连接目标固定为校验通过的 IP 字面量，连接阶段不触发任何 DNS |
 | 连接重试不能进入禁区 | 重试只在**已批准**的地址集合内逐个尝试，绝不重新解析 |
-| 跳转不能进入禁区 | 每个跳转目标重新走“解析→全量校验→连接”，被拒即停 |
+| 跳转不能进入禁区 | 每个跳转目标重新走“解析→别名追踪→全量校验→连接”，被拒即停 |
 | 被拒目标收不到探测请求 | 拒绝发生在任何 socket 创建之前；集成测试与目标访问日志双向验证 |
 | HTTPS 按原域名验证证书 | `check_hostname=True`、`CERT_REQUIRED`，SNI/校验均用原域名，无关闭开关 |
 | 慢探测不阻塞其他请求 | 全异步 + 单事件循环；并发信号量，满额立即返回 429；单请求总超时 |
@@ -40,8 +48,8 @@ URL 静态校验（不产生流量）
 app/
   probe/            探测服务
     policy.py       IPv4 CIDR 白名单与 URL 静态校验（所有连接决策的唯一入口）
-    dns_wire.py     自研 DNS 线协议（RFC1035 子集，查询/应答/压缩指针防护）
-    dns_client.py   异步 DNS 客户端（仅向配置的解析器发 A 查询）
+    dns_wire.py     自研 DNS 线协议（RFC1035 子集，A/CNAME、压缩指针防护）
+    dns_client.py   异步 DNS 客户端（配置解析器、CNAME 链追踪、属主归属与有界跳数）
     connection.py   固定到已批准 IP 的 TCP 连接 + 强制校验的 TLS
     http_probe.py   逐跳 HTTP/1.1 探测引擎、跳转规范化与上限
     config.py       环境变量配置（启动时校验）
@@ -49,9 +57,9 @@ app/
   dns_service/      本地可切换解析的 DNS（UDP/53 + HTTP 控制面 profile 热切换）
   targets/          演示目标（HTTP/8080、HTTPS/8443，含各类跳转与访问记录）
   certinit/         生成演示 CA、服务器证书、合并 CA bundle
-dns-profiles/       DNS 场景：allowed / swapped / mixed / loop
+dns-profiles/       DNS 场景：allowed / swapped / mixed / loop / alias / cname-smuggle
 compose.yaml        一键启动的完整演示环境
-tests/              57 个测试（策略、DNS 协议、TLS、跳转、并发、API 全链路）
+tests/              88 个测试（策略、DNS 协议、CNAME 安全、TLS、跳转、并发、API 全链路）
 scripts/demo.sh     演示脚本
 ```
 
@@ -121,13 +129,16 @@ open http://127.0.0.1:8000/docs
 
 每跳字段含义：
 
-- `resolved_addresses`：DNS 实际返回的全部 A 记录；
+- `resolved_addresses`：沿 CNAME 链可追溯的全部 A 记录（**只有这些地址可能被连接**）；
+- `cname_chain`：从请求域名沿 CNAME 链可追溯的属主序列，无别名时仅含请求域名；
+- `foreign_a_records`：DNS 应答中夹带的、不属于本别名链属主的 A 记录（审计展示，绝不用于连接）；
+- `dns_queried_names`：本跳实际向配置解析器发出的查询名序列；
 - `approved_addresses`：通过白名单的地址（被整体拒绝时为空）；
 - `connected_peer`：**实际**建立 TCP 连接的 `ip:port`（固定为已批准 IP）；
 - `tls`：TLS 版本、套件、证书 subject/SAN（HTTPS 时）；
 - `request_sent`：是否真的发出了 HTTP 请求（被策略拒绝时恒为 `false`）；
 - `outcome`：`ok` / `redirected` / `blocked` / `error`；
-- `reject_reason` / `error`：拒绝或失败的具体原因。
+- `reject_reason` / `error`：拒绝或失败的具体原因（含断链、成环、超跳数、归属不符等）。
 
 辅助接口：`GET /api/v1/policy`（当前白名单与超时配置）、`GET /healthz`。
 
@@ -149,6 +160,26 @@ curl -X POST http://127.0.0.1:8053/profiles/switch \
 | `swapped` | 同名域名从允许地址换到禁止地址（**检查后换址 / DNS rebinding**） |
 | `mixed` | 一次应答同时含允许与禁止地址，验证“全部获准才连接” |
 | `loop` | 连环 307 跳转，验证 3 次跳转上限 |
+| `alias` | 正常 CNAME 别名：单跳、多跳、链尾多 A、HTTPS 别名，验证沿链追踪后正常探测 |
+| `cname-smuggle` | CNAME 攻击面：夹带外域名 A（含白名单内/外地址）、无别名夹带、断链、成环、超跳数 |
+
+profile 的 zone 条目支持三种写法：
+
+```json
+{
+  "zones": {
+    "plain.example.test": ["172.31.10.10"],
+    "alias.example.test": {"cname": "target.example.test"},
+    "rich.example.test": [
+      {"type": "CNAME", "name": "rich.example.test", "value": "target.example.test"},
+      {"type": "A", "name": "target.example.test", "value": "172.31.10.10"},
+      {"type": "A", "name": "other.example.test", "value": "172.31.20.10"}
+    ]
+  }
+}
+```
+
+第三种写法可构造任意属主的混杂应答，用来验证探测端不会被夹带的外域名 A 误导。
 
 ## 配置项（探测服务环境变量）
 
@@ -157,6 +188,7 @@ curl -X POST http://127.0.0.1:8053/profiles/switch \
 | `ALLOWED_CIDRS` | （必填） | 逗号分隔的 IPv4 CIDR 白名单 |
 | `DNS_SERVER` / `DNS_PORT` | 127.0.0.1 / 53 | 唯一允许使用的解析器（IP 字面量） |
 | `DNS_TIMEOUT` / `DNS_RETRIES` | 3.0 / 1 | DNS 单次超时与重试次数 |
+| `MAX_CNAME_HOPS` | 8 | CNAME 别名链有界跳数，允许 0..16；0 表示禁止一切别名 |
 | `CA_BUNDLE` | 系统信任库 | 信任 CA 文件（演示环境为系统 CA + 演示 CA 合并） |
 | `CONNECT_TIMEOUT` / `TLS_TIMEOUT` / `READ_TIMEOUT` | 5 / 8 / 10 秒 | 各阶段超时 |
 | `MAX_REDIRECTS` | 3 | 跳转上限，仅允许 0..3 |
@@ -170,14 +202,17 @@ pip install -r requirements.txt pytest pytest-asyncio
 pytest -q
 ```
 
-57 个测试覆盖：CIDR/URL 策略、DNS 编解码与压缩指针环路、全链路探测、
-混合解析整体拒绝、检查后换址、跳转上限/跳禁区/非 HTTP 协议、HTTPS 证书
-主机名校验与不受信证书拒绝、慢探测并发非阻塞、429 保护、API 层。
+88 个测试覆盖：CIDR/URL 策略、DNS 编解码与压缩指针环路、CNAME 线协议、
+别名链追踪（单跳/多跳/链尾多 A）、夹带外域名 A（白名单内外均拒绝）、
+归属不符、断链/成环/超跳数、全链路探测、混合解析整体拒绝、检查后换址、
+跳转上限/跳禁区/非 HTTP 协议、HTTPS 证书主机名校验与不受信证书拒绝、
+慢探测并发非阻塞、429 保护、API 层。
 
 ## 设计边界与说明
 
 - 探测只实现 GET/HEAD、HTTP/1.1，读取响应体有 64KB 上限，仅用于连通性判断；
 - 不跟随 cookie、不发送请求体、不执行任何页面脚本；
-- DNS 仅做 A 记录查询（AAAA 不存在即天然 IPv4-only）；
+- DNS 仅做 A 记录查询（AAAA 不存在即天然 IPv4-only）；CNAME 只用于别名链
+  追踪，链上任何名字都不会被拿去做解析器自举；
 - 演示 CA 与证书仅用于本地/compose 演示，生产环境应使用真实 PKI 并通过
   `CA_BUNDLE` 指定信任根。

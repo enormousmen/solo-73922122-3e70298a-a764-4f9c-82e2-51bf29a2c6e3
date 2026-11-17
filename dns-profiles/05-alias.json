@@ -1,0 +1,37 @@
+{
+  "profile": "alias",
+  "description": "正常 CNAME 别名场景：单跳、多跳、链尾多 A 的别名都应沿链追踪后正常探测",
+  "zones": {
+    "allowed.demo.test":        ["172.31.10.10"],
+    "www.allowed.demo.test":    ["172.31.10.10"],
+    "https.allowed.demo.test":  ["172.31.10.10"],
+    "multi-a.demo.test":        ["172.31.10.10", "172.31.10.11"],
+    "redirect-ok.demo.test":    ["172.31.10.10"],
+    "redirect-final.demo.test": ["172.31.10.10"],
+    "loop1.demo.test":          ["172.31.10.10"],
+    "loop2.demo.test":          ["172.31.10.10"],
+    "loop3.demo.test":          ["172.31.10.10"],
+    "loop4.demo.test":          ["172.31.10.10"],
+    "forbidden.demo.test":      ["172.31.20.10"],
+    "swapped.demo.test":        ["172.31.10.10"],
+
+    "alias-one.demo.test": {
+      "cname": "allowed.demo.test"
+    },
+    "alias-chain1.demo.test": {
+      "cname": "alias-chain2.demo.test"
+    },
+    "alias-chain2.demo.test": {
+      "cname": "alias-chain3.demo.test"
+    },
+    "alias-chain3.demo.test": [
+      "172.31.10.10"
+    ],
+    "alias-multi.demo.test": {
+      "cname": "multi-a.demo.test"
+    },
+    "alias-https.demo.test": {
+      "cname": "https.allowed.demo.test"
+    }
+  }
+}
